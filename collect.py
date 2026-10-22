@@ -74,6 +74,14 @@ from pathlib import Path
 
 API = "https://api.gitcode.com/api/v5"
 ORGS = ["cann", "openJiuwen"]
+
+# 分支级采集目标：(组织, 仓库, 分支)
+# Star / Fork / Issue 只存在于仓库级别，分支没有独立计数 —— 这是 git 托管平台的
+# 数据模型决定的。分支级真正能取到的只有「该分支的提交数」与「以该分支为合入
+# 目标的 PR 数」，其余指标继承自所属仓库并在快照中标注 repo_level_inherited。
+BRANCH_TARGETS = [
+    ("openJiuwen", "agent-solution", "electric"),
+]
 UA = "gitcode-dashboard-collector/1.0"
 TIMEOUT = 60
 RATE_PER_MIN = 320          # 官方上限 400/分，留两成余量
