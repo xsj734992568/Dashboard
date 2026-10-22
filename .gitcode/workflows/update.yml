@@ -1,0 +1,71 @@
+# GitCode 流水线：定时采集指标并提交快照
+#
+# ────────────────────────────────────────────────────────────────────────────
+# 与 GitHub 版的区别，使用前请先读
+# ────────────────────────────────────────────────────────────────────────────
+# 1. 目录不同：GitCode 的流水线配置放在 .gitcode/workflows/ 下（GitHub 是
+#    .github/workflows/）。两套配置可以共存，互不影响。
+#
+# 2. Action 引用格式不同：GitCode 用 checkout-action@0.0.1 这种短名，
+#    不是 GitHub 的 actions/checkout@v4。官方文档未声明兼容 GitHub Actions，
+#    所以不能直接照搬 GitHub 的 action。
+#
+# 3. Runner：GitCode 默认提供 EulerOS 托管 runner，每个 Job 分配一台新虚拟机，
+#    不需要自建。
+#
+# 4. ⚠ 定时触发：官方文档明确列出支持"定时触发（Scheduled trigger）"，
+#    但未公开 cron 的字段名与语法。下面按 GitHub 习惯写法填写，
+#    **首次使用务必验证是否真的被调度**。两种验证方式：
+#      · 保存后看流水线页面是否显示下次执行时间
+#      · 或用界面上的「新建流水线」选模板，看定时触发在界面里怎么配，
+#        再照着改本文件
+#    若平台不认这个语法，改用下面「方案 B」。
+#
+# 5. ⚠ 仓库密钥（secrets）：官方流水线文档未提及。GITCODE_TOKEN 必须走密钥，
+#    绝不能写进本文件——这个仓库若是公开的，令牌会直接暴露。
+#    若确认平台不支持密钥，就别用流水线采集，改用方案 B。
+#
+# ────────────────────────────────────────────────────────────────────────────
+# 方案 B（不依赖平台定时与密钥）：在你自己的机器或服务器上跑 cron，
+#   10 */6 * * * cd /srv/dashboard && GITCODE_TOKEN=xxx python3 collect.py --outdir public
+# 令牌留在本机环境变量里，最省心也最可控。
+# ────────────────────────────────────────────────────────────────────────────
+
+name: 采集 GitCode 指标
+
+on:
+  push:
+    branches: ["main"]
+  # 定时触发：字段名与语法待平台侧验证，见上面第 4 条
+  schedule:
+    - cron: "10 18,0,6,12 * * *"   # UTC，对应北京时间 02:10 / 08:10 / 14:10 / 20:10
+
+jobs:
+  collect:
+    runs-on: euleros-2.10.1
+    steps:
+      - uses: checkout-action@0.0.1
+
+      - name: 采集指标
+        run: |
+          cd repo_workspace
+          python3 -V
+          if [ -z "$GITCODE_TOKEN" ]; then
+            echo "错误：未配置 GITCODE_TOKEN 密钥"
+            echo "若平台不支持仓库密钥，请改用方案 B（本机 cron），不要把令牌写进本文件"
+            exit 1
+          fi
+          python3 collect.py --outdir public --workers 6
+
+      - name: 提交快照
+        run: |
+          cd repo_workspace
+          git config user.name  "dashboard-bot"
+          git config user.email "dashboard-bot@noreply.gitcode.com"
+          git add public/snapshots public/timeseries.csv
+          if git diff --staged --quiet; then
+            echo "数据无变化，跳过提交"
+          else
+            git commit -m "数据更新 $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git push
+          fi

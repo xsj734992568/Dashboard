@@ -1,0 +1,75 @@
+# 定时采集 GitCode 指标并发布看板
+#
+# 做两件事：按计划运行 collect.py 产出新快照并提交回仓库（这样历史快照
+# 和时间序列都留在 git 里），然后把 public/ 发布到 GitHub Pages。
+#
+# 启用前需要在仓库设置里准备两样：
+#   Settings → Secrets and variables → Actions → New repository secret
+#       名称 GITCODE_TOKEN，值为 gitcode.com/setting/token-classic 生成的令牌
+#   Settings → Pages → Source 选择 "GitHub Actions"
+name: 采集并发布看板
+
+on:
+  schedule:
+    # UTC 时间，每 6 小时一次（北京时间 02:10 / 08:10 / 14:10 / 20:10）
+    # 避开整点，整点是 CI 高峰容易排队
+    - cron: "10 18,0,6,12 * * *"
+  workflow_dispatch:        # 允许手动触发，便于首次验证
+  push:
+    branches: [main]
+    paths:
+      - "public/index.html"
+      - "collect.py"
+      - "manual_metrics.csv"
+
+permissions:
+  contents: write           # 提交快照回仓库
+  pages: write
+  id-token: write
+
+concurrency:
+  group: dashboard
+  cancel-in-progress: false  # 采集中途被取消会留下半份数据，故不取消
+
+jobs:
+  collect-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 采集指标
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          if [ -z "$GITCODE_TOKEN" ]; then
+            echo "::error::未配置 GITCODE_TOKEN，请在仓库 Secrets 中添加"
+            exit 1
+          fi
+          python collect.py --outdir public --workers 6
+
+      - name: 提交快照
+        run: |
+          git config user.name  "dashboard-bot"
+          git config user.email "dashboard-bot@users.noreply.github.com"
+          git add public/snapshots public/timeseries.csv
+          if git diff --staged --quiet; then
+            echo "数据无变化，跳过提交"
+          else
+            git commit -m "数据更新 $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git push
+          fi
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}

@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GitCode 社区指标看板</title>
+<style>
+  /* 布局：顶部状态条 + 视图切换 + KPI 卡片 + 趋势 + 排名 + 明细表 */
+  :root{
+    --bg:#f7f7f5; --panel:#ffffff; --fg:#1c1c1a; --fg-muted:#6b6b66;
+    --line:#e3e3df; --accent:#2f6f5c; --accent-2:#2f6fa8;
+    --ok:#2f7d4f; --warn:#b8860b; --bad:#b3433a;
+    --font:"Segoe UI",system-ui,-apple-system,"Microsoft YaHei",sans-serif;
+    --mono:"Cascadia Mono",Consolas,ui-monospace,monospace;
+    color-scheme:light;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --bg:#17181a; --panel:#1f2124; --fg:#e8e8e4; --fg-muted:#9b9b95;
+      --line:#2f3236; --accent:#5fb89b; --accent-2:#6aa8d8;
+      --ok:#5cc07f; --warn:#d8a93a; --bad:#e0796e; color-scheme:dark;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#17181a; --panel:#1f2124; --fg:#e8e8e4; --fg-muted:#9b9b95;
+    --line:#2f3236; --accent:#5fb89b; --accent-2:#6aa8d8;
+    --ok:#5cc07f; --warn:#d8a93a; --bad:#e0796e; color-scheme:dark;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--font);
+       font-size:14px;line-height:1.55}
+  .wrap{max-width:1180px;margin:0 auto;padding-block:24px;
+        padding-left:max(16px,env(safe-area-inset-left,0px));
+        padding-right:max(16px,env(safe-area-inset-right,0px));
+        display:flex;flex-direction:column;gap:22px}
+  h1{margin:0;font-size:1.3rem;font-weight:600}
+  h2{margin:0;font-size:.98rem;font-weight:600}
+  .sub{color:var(--fg-muted);font-size:.84rem}
+  .bar{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:baseline}
+  .pill{border:1px solid var(--line);border-radius:999px;padding:3px 10px;
+        font-size:.76rem;color:var(--fg-muted);background:var(--panel)}
+  .pill.warn{border-color:var(--warn);color:var(--warn)}
+  .views{display:flex;gap:8px;flex-wrap:wrap}
+  .views button{font:inherit;font-size:.84rem;cursor:pointer;padding:6px 14px;
+        border:1px solid var(--line);background:var(--panel);color:var(--fg);
+        border-radius:7px}
+  .views button[aria-pressed="true"]{background:var(--accent);color:#fff;
+        border-color:var(--accent)}
+  .views button:focus-visible{outline:2px solid var(--accent-2);outline-offset:2px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:12px}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+       padding:13px 15px;display:flex;flex-direction:column;gap:3px;min-width:0}
+  .kpi .k{font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;
+          color:var(--fg-muted)}
+  .kpi .v{font-size:1.6rem;line-height:1.15;font-variant-numeric:tabular-nums}
+  .kpi .d{font-size:.75rem;color:var(--fg-muted)}
+  .kpi .d.up{color:var(--ok)} .kpi .d.flat{color:var(--fg-muted)}
+  .kpi.manual{border-style:dashed}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+        padding:15px 16px;display:flex;flex-direction:column;gap:12px;min-width:0}
+  .chart{width:100%;min-width:0}
+  .tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;
+             background:var(--panel)}
+  table{border-collapse:collapse;width:100%;font-size:.82rem}
+  th,td{padding:8px 11px;text-align:right;white-space:nowrap;
+        border-bottom:1px solid var(--line)}
+  th:first-child,td:first-child{text-align:left;position:sticky;left:0;
+        background:var(--panel)}
+  thead th{font-size:.73rem;text-transform:uppercase;letter-spacing:.03em;
+        color:var(--fg-muted);font-weight:600;cursor:pointer;user-select:none}
+  thead th:hover{color:var(--fg)}
+  thead th[aria-sort]{color:var(--accent)}
+  tbody tr:last-child td{border-bottom:none}
+  td{font-variant-numeric:tabular-nums}
+  td.zero{color:var(--warn)}
+  .note{margin:0;font-size:.8rem;color:var(--fg-muted)}
+  .gap{border:1px solid var(--warn);border-left-width:3px;border-radius:9px;
+       padding:12px 14px;background:var(--panel)}
+  .gap b{color:var(--warn)}
+  .state{padding:40px 16px;text-align:center;color:var(--fg-muted)}
+  .state code{font-family:var(--mono);background:var(--panel);
+       border:1px solid var(--line);border-radius:5px;padding:2px 6px;
+       display:inline-block;margin-top:6px;font-size:.84rem}
+  .state.err{color:var(--bad)}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap" id="root">
+  <div class="state" id="boot">正在读取快照 …</div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var SNAPSHOT = "snapshots/latest.json";
+  var SERIES = "timeseries.csv";
+  var POLL_MS = 5 * 60 * 1000;   // 每 5 分钟回查一次是否有新快照
+
+  var S = null;        // 快照
+  var lastStamp = null;// 上次渲染的采集时刻，用于判断是否真的有新数据
+  var pollTimer = null;
+  var SER = [];        // 时间序列
+  var view = "all";    // 当前视图：all 或某个组织名
+  var sortKey = "stars", sortDir = -1;
+
+  var N = function (v) { return (v === null || v === undefined || v === "") ? null : Number(v); };
+  var f = function (v) { return (v === null || v === undefined || isNaN(v)) ? "—" : Number(v).toLocaleString("en-US"); };
+  var esc = function (s) { return String(s === null || s === undefined ? "" : s); };
+
+  function daysBetween(a, b) {
+    var d = (new Date(b) - new Date(a)) / 86400000;
+    return isNaN(d) ? null : Math.round(d);
+  }
+
+  // ---------- 读取 ----------
+  /** 轮询：静默拉取，只有采集时刻变了才重绘 */
+  function poll() {
+    fetch(SNAPSHOT, { cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        if (!j || j.collected_at === lastStamp) return;
+        S = j;
+        return fetch(SERIES, { cache: "no-store" })
+          .then(function (r) { return r.ok ? r.text() : ""; })
+          .catch(function () { return ""; })
+          .then(function (txt) { if (txt) SER = parseSeries(txt); render(); });
+      })
+      .catch(function () { /* 网络抖动忽略，下个周期再试 */ });
+  }
+
+  function schedulePoll() {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(function () {
+      if (!document.hidden) poll();
+    }, POLL_MS);
+    // 标签页重新可见时立刻查一次，而不是干等下个周期
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) poll();
+    });
+  }
+
+  function boot() {
+    fetch(SNAPSHOT, { cache: "no-store" })
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then(function (j) {
+        S = j;
+        return fetch(SERIES, { cache: "no-store" })
+          .then(function (r) { return r.ok ? r.text() : ""; })
+          .catch(function () { return ""; });
+      })
+      .then(function (txt) {
+        if (txt) SER = parseSeries(txt);
+        render();
+        schedulePoll();
+      })
+      .catch(function (e) {
+        var isFile = location.protocol === "file:";
+        document.getElementById("root").innerHTML =
+          '<div class="state err"><p><b>读不到快照</b>（' + esc(e.message) + '）</p>' +
+          (isFile
+            ? '<p>浏览器不允许用 file:// 读取本地 JSON。请在快照所在目录启动本地服务：</p>' +
+              '<code>python serve.py</code>'
+            : '<p>请确认 <code>' + SNAPSHOT + '</code> 与本页面在同一目录，' +
+              '并已运行过 <code>collect.py</code>。</p>') +
+          '</div>';
+      });
+  }
+
+  function parseSeries(txt) {
+    var lines = txt.replace(/^﻿/, "").trim().split(/\r?\n/);
+    if (lines.length < 2) return [];
+    var cols = lines[0].split(",");
+    return lines.slice(1).map(function (ln) {
+      var cells = ln.split(","), o = {};
+      cols.forEach(function (c, i) { o[c.trim()] = (cells[i] || "").trim(); });
+      return o;
+    });
+  }
+
+  // ---------- 视图数据 ----------
+  function rowsInView() {
+    var rs = (S.repos || []);
+    return view === "all" ? rs : rs.filter(function (r) { return r.org === view; });
+  }
+
+  function sum(rs, key) {
+    var any = false, t = 0;
+    rs.forEach(function (r) {
+      var v = N(r[key]);
+      if (v !== null && !isNaN(v)) { t += v; any = true; }
+    });
+    return any ? t : null;
+  }
+
+  function orgs() {
+    var seen = [];
+    (S.repos || []).forEach(function (r) {
+      if (r.org && seen.indexOf(r.org) < 0) seen.push(r.org);
+    });
+    return seen;
+  }
+
+  /** 时间序列里按采集时刻汇总某字段，用于趋势线 */
+  function seriesTotals(key) {
+    if (!SER.length) return [];
+    var m = {};
+    SER.forEach(function (r) {
+      if (view !== "all" && r.org !== view) return;
+      var t = r.collected_at;
+      if (!t) return;
+      var v = Number(r[key]);
+      if (isNaN(v)) return;
+      m[t] = (m[t] || 0) + v;
+    });
+    return Object.keys(m).sort().map(function (t) { return { t: t, v: m[t] }; });
+  }
+
+  // ---------- 绘图（纯 SVG，无外部依赖） ----------
+  function hbars(host, items, color) {
+    host.innerHTML = "";
+    if (!items.length) { host.innerHTML = '<p class="note">暂无数据</p>'; return; }
+    var w = Math.max(300, host.clientWidth || 700);
+    var narrow = w < 520;
+    var padL = narrow ? 118 : 190, padR = 58, rowH = 21, padT = 4;
+    var h = padT * 2 + items.length * rowH;
+    var max = Math.max.apply(null, items.map(function (d) { return d.v || 0; })) || 1;
+    var innerW = Math.max(30, w - padL - padR);
+    var parts = ['<svg width="100%" viewBox="0 0 ' + w + ' ' + h +
+                 '" role="img" aria-label="排名条形图">'];
+    items.forEach(function (d, i) {
+      var y = padT + i * rowH;
+      var bw = Math.max(1, (d.v || 0) / max * innerW);
+      var label = narrow && d.label.length > 16 ? d.label.slice(0, 15) + "…" : d.label;
+      parts.push('<text x="' + (padL - 8) + '" y="' + (y + rowH / 2) +
+        '" dy="0.35em" text-anchor="end" font-size="11" fill="var(--fg-muted)">' +
+        esc(label) + '</text>');
+      parts.push('<rect x="' + padL + '" y="' + (y + 4) + '" width="' + bw +
+        '" height="' + (rowH - 8) + '" rx="2" fill="' + color + '"></rect>');
+      parts.push('<text x="' + (padL + bw + 6) + '" y="' + (y + rowH / 2) +
+        '" dy="0.35em" font-size="11" fill="var(--fg)">' + f(d.v) + '</text>');
+    });
+    parts.push("</svg>");
+    host.innerHTML = parts.join("");
+  }
+
+  function sparkline(host, pts, color) {
+    host.innerHTML = "";
+    if (pts.length < 2) {
+      host.innerHTML = '<p class="note">趋势需要至少两次采集。' +
+        '目前只有 ' + pts.length + ' 个数据点 —— 每天跑一次 collect.py，曲线就会长出来。</p>';
+      return;
+    }
+    var w = Math.max(300, host.clientWidth || 700), h = 130;
+    var padL = 54, padR = 12, padT = 10, padB = 24;
+    var vs = pts.map(function (p) { return p.v; });
+    var min = Math.min.apply(null, vs), max = Math.max.apply(null, vs);
+    if (min === max) { min = min - 1; max = max + 1; }
+    var X = function (i) { return padL + i / (pts.length - 1) * (w - padL - padR); };
+    var Y = function (v) { return padT + (1 - (v - min) / (max - min)) * (h - padT - padB); };
+    var d = pts.map(function (p, i) { return (i ? "L" : "M") + X(i) + " " + Y(p.v); }).join(" ");
+    var area = d + " L" + X(pts.length - 1) + " " + (h - padB) + " L" + padL + " " + (h - padB) + " Z";
+    var out = ['<svg width="100%" viewBox="0 0 ' + w + ' ' + h +
+               '" role="img" aria-label="趋势曲线">'];
+    [max, min].forEach(function (v) {
+      out.push('<line x1="' + padL + '" x2="' + (w - padR) + '" y1="' + Y(v) +
+        '" y2="' + Y(v) + '" stroke="var(--line)" stroke-width="1"></line>');
+      out.push('<text x="' + (padL - 7) + '" y="' + Y(v) +
+        '" dy="0.35em" text-anchor="end" font-size="10" fill="var(--fg-muted)">' +
+        f(v) + '</text>');
+    });
+    out.push('<path d="' + area + '" fill="' + color + '" opacity="0.12"></path>');
+    out.push('<path d="' + d + '" fill="none" stroke="' + color +
+      '" stroke-width="2" stroke-linejoin="round"></path>');
+    out.push('<circle cx="' + X(pts.length - 1) + '" cy="' + Y(pts[pts.length - 1].v) +
+      '" r="3.5" fill="' + color + '"></circle>');
+    [0, pts.length - 1].forEach(function (i) {
+      out.push('<text x="' + X(i) + '" y="' + (h - 7) + '" font-size="10" fill="var(--fg-muted)" ' +
+        'text-anchor="' + (i ? "end" : "start") + '">' +
+        esc(pts[i].t.slice(5, 16).replace("T", " ")) + '</text>');
+    });
+    out.push("</svg>");
+    host.innerHTML = out.join("");
+  }
+
+  // ---------- 渲染 ----------
+  var COLS = [
+    ["display", "仓库", "s"], ["stars", "Star", "n"], ["forks", "Fork", "n"],
+    ["issues_total", "Issue 累计", "n"], ["issues_open", "未关闭", "n"],
+    ["pr_all", "PR 累计", "n"], ["pr_merged", "已合入", "n"],
+    ["pr_created_window", "窗内新增 PR", "n"],
+    ["commits_total", "提交累计", "n"], ["commits_window", "窗内提交", "n"],
+    ["downloads_all", "下载累计*", "n"], ["visits_30d", "近月访问*", "n"],
+    ["language", "语言", "s"], ["pushed_at", "最后提交", "s"]
+  ];
+
+  function render() {
+    lastStamp = S.collected_at;
+    var rs = rowsInView();
+    var win = S.window_days || 30;
+    var mdate = S.manual_metrics_measured_at;
+    var gap = mdate ? daysBetween(mdate, S.collected_at) : null;
+
+    var h = [];
+    h.push('<div>');
+    h.push('<h1>GitCode 社区指标看板</h1>');
+    h.push('<div class="bar" style="margin-top:6px">');
+    h.push('<span class="sub">采集于 ' + esc((S.collected_at || "").replace("T", " ").slice(0, 16)) +
+           '，共 ' + f(rs.length) + ' 个仓库，时间窗近 ' + win + ' 天</span>');
+    h.push('<span class="pill">自动指标来自 GitCode OpenAPI</span>');
+    var age = S.collected_at ? Math.round((Date.now() - new Date(S.collected_at)) / 3600000) : null;
+    if (age !== null && !isNaN(age)) {
+      h.push('<span class="pill' + (age > 36 ? ' warn' : '') + '" id="age">数据新鲜度 ' +
+        (age < 1 ? '1 小时内' : age + ' 小时前') +
+        (age > 36 ? '（采集可能已中断）' : '') + '</span>');
+    }
+    if (mdate) {
+      h.push('<span class="pill' + (gap !== null && gap > 7 ? ' warn' : '') +
+        '">流量指标人工录入 · 实测日 ' + esc(mdate) +
+        (gap !== null && gap > 7 ? '（已过 ' + gap + ' 天）' : '') + '</span>');
+    } else {
+      h.push('<span class="pill warn">流量指标未录入</span>');
+    }
+    h.push('</div></div>');
+
+    // 视图切换 —— 两个看板共用一套页面，靠这里切范围
+    var os = orgs();
+    if (os.length > 1) {
+      h.push('<div class="views" id="views">');
+      h.push('<button data-v="all" aria-pressed="' + (view === "all") + '">全部</button>');
+      os.forEach(function (o) {
+        h.push('<button data-v="' + esc(o) + '" aria-pressed="' + (view === o) +
+               '">' + esc(o) + '</button>');
+      });
+      h.push('</div>');
+    }
+
+    // KPI
+    var stale = rs.filter(function (r) { return N(r.commits_window) === 0; }).length;
+    var prev = seriesTotals("stars");
+    var delta = null;
+    if (prev.length >= 2) delta = prev[prev.length - 1].v - prev[prev.length - 2].v;
+    var kpis = [
+      ["Star 合计", sum(rs, "stars"),
+        delta === null ? "" : (delta > 0 ? "较上次 +" + f(delta) : "较上次 " + f(delta)),
+        delta > 0 ? "up" : "flat", false],
+      ["Fork 合计", sum(rs, "forks"), "", "", false],
+      ["Issue 累计", sum(rs, "issues_total"),
+        "未关闭 " + f(sum(rs, "issues_open")), "", false],
+      ["PR 累计", sum(rs, "pr_all"),
+        "已合入 " + f(sum(rs, "pr_merged")), "", false],
+      ["近 " + win + " 天提交", sum(rs, "commits_window"),
+        stale + " 个仓库零提交", stale ? "flat" : "", false],
+      ["下载累计", sum(rs, "downloads_all"), "人工录入", "", true]
+    ];
+    h.push('<div class="kpis">');
+    kpis.forEach(function (k) {
+      h.push('<div class="kpi' + (k[4] ? " manual" : "") + '"><span class="k">' + k[0] +
+        '</span><span class="v">' + f(k[1]) + '</span>' +
+        (k[2] ? '<span class="d ' + (k[3] || "") + '">' + k[2] + '</span>' : '') + '</div>');
+    });
+    h.push('</div>');
+
+    // 趋势
+    h.push('<div class="card"><h2>Star 合计趋势</h2>' +
+           '<div class="chart" id="spark"></div></div>');
+
+    // 排名
+    h.push('<div class="card"><h2>Star 排名前 15</h2>' +
+           '<div class="chart" id="top"></div></div>');
+
+    // 明细表
+    h.push('<div><h2 style="margin-bottom:8px">仓库明细</h2><div class="tablewrap"><table>');
+    h.push('<thead><tr>');
+    COLS.forEach(function (c) {
+      h.push('<th data-k="' + c[0] + '"' +
+        (sortKey === c[0] ? ' aria-sort="' + (sortDir < 0 ? "descending" : "ascending") + '"' : '') +
+        '>' + c[1] + (sortKey === c[0] ? (sortDir < 0 ? " ↓" : " ↑") : "") + '</th>');
+    });
+    h.push('</tr></thead><tbody>');
+    rs.slice().sort(function (a, b) {
+      var ka = sortKey === "display" ? (a.org + "/" + a.repo) : a[sortKey];
+      var kb = sortKey === "display" ? (b.org + "/" + b.repo) : b[sortKey];
+      if (typeof ka === "string" || typeof kb === "string") {
+        return String(ka || "").localeCompare(String(kb || "")) * sortDir;
+      }
+      return ((N(ka) || 0) - (N(kb) || 0)) * sortDir;
+    }).forEach(function (r) {
+      h.push("<tr>");
+      COLS.forEach(function (c) {
+        var k = c[0], v;
+        if (k === "display") v = esc(r.org + "/" + r.repo);
+        else if (c[2] === "n") v = f(N(r[k]));
+        else v = esc(k === "pushed_at" ? String(r[k] || "").slice(0, 10) : r[k]);
+        var cls = (k === "commits_window" && N(r[k]) === 0) ? ' class="zero"' : "";
+        h.push("<td" + cls + ">" + v + "</td>");
+      });
+      h.push("</tr>");
+    });
+    h.push('</tbody></table></div>');
+    h.push('<p class="note" style="margin-top:8px">带 * 的两列为人工录入；' +
+           '“窗内”指近 ' + win + ' 天。点表头可排序。</p></div>');
+
+    // 数据缺口说明
+    h.push('<div class="gap"><b>下载量与访问量无法自动采集</b>' +
+      '<p class="note" style="margin-top:5px">GitCode 未开放流量类接口（已实测 10 个候选路径全部 404，' +
+      '官方 21 个 API 分类中亦无此类目），这两项由人工从网页抄录，' +
+      '其时点可能与自动指标不一致。</p></div>');
+
+    document.getElementById("root").innerHTML = h.join("");
+
+    sparkline(document.getElementById("spark"), prev, "var(--accent)");
+    hbars(document.getElementById("top"),
+      rs.slice().sort(function (a, b) { return (N(b.stars) || 0) - (N(a.stars) || 0); })
+        .slice(0, 15)
+        .map(function (r) { return { label: r.org + "/" + r.repo, v: N(r.stars) }; }),
+      "var(--accent)");
+
+    var vw = document.getElementById("views");
+    if (vw) {
+      vw.addEventListener("click", function (e) {
+        var b = e.target.closest("button[data-v]");
+        if (!b) return;
+        view = b.getAttribute("data-v");
+        render();
+      });
+    }
+    document.querySelectorAll("thead th[data-k]").forEach(function (th) {
+      th.addEventListener("click", function () {
+        var k = th.getAttribute("data-k");
+        if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = -1; }
+        render();
+      });
+    });
+  }
+
+  var resizeT;
+  window.addEventListener("resize", function () {
+    clearTimeout(resizeT);
+    resizeT = setTimeout(function () { if (S) render(); }, 180);
+  });
+
+  boot();
+})();
+</script>
+</body>
+</html>
