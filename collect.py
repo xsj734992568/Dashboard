@@ -310,6 +310,56 @@ def repo_detail(org: str, repo: str, since_iso: str) -> dict:
     return d
 
 
+def branch_detail(org: str, repo: str, branch: str, since_iso: str) -> dict:
+    """采集某个分支的提交数与以它为目标的 PR 数。
+
+    GitCode 文档未写明 commits 接口的分支参数名，这里依次尝试 sha / ref /
+    branch，并把真正生效的那个记进快照，便于以后确认。
+    """
+    d: dict = {"branch": branch, "errors": []}
+    base = f"/repos/{org}/{repo}"
+
+    # 提交数：全量与时间窗
+    param_used = None
+    for key in ("sha", "ref", "branch"):
+        try:
+            _, h = api(f"{base}/commits", {key: branch, "per_page": 1})
+            tot = _total(h)
+            if tot is None:
+                continue
+            d["commits_total"] = tot
+            param_used = key
+            break
+        except ApiError as e:
+            d["errors"].append(f"commits[{key}]: {e}")
+    d["branch_param"] = param_used
+    if param_used:
+        try:
+            _, h = api(f"{base}/commits",
+                       {param_used: branch, "since": since_iso, "per_page": 1})
+            d["commits_window"] = _total(h)
+        except ApiError as e:
+            d["errors"].append(str(e))
+
+    # PR：以该分支为合入目标（base 参数文档中明确支持）
+    try:
+        body, _ = api(f"{base}/pulls", {"only_count": "true", "base": branch})
+        if isinstance(body, dict):
+            d.update({f"pr_{k}": body.get(k) for k in
+                      ("all", "opened", "closed", "merged", "locked")})
+    except ApiError as e:
+        d["errors"].append(str(e))
+    try:
+        body, _ = api(f"{base}/pulls",
+                      {"only_count": "true", "base": branch,
+                       "created_after": since_iso})
+        if isinstance(body, dict):
+            d["pr_created_window"] = body.get("all")
+    except ApiError as e:
+        d["errors"].append(str(e))
+    return d
+
+
 def load_manual(path: Path) -> tuple[dict, str | None]:
     """读取人工录入的下载量/访问量。CSV 列：repo,downloads_all,downloads_30d,visits_30d,measured_at"""
     if not path.exists():
@@ -451,6 +501,43 @@ def main() -> int:
                     print(f"   {done}/{total}  已用 {el:.0f}s"
                           f"  预计剩余 {el / done * (total - done):.0f}s")
 
+    # 分支级目标：追加为独立行，仓库级指标继承自母仓库并标注
+    if BRANCH_TARGETS and not args.quick:
+        print(f"\n分支级采集（{len(BRANCH_TARGETS)} 个目标）…")
+        for org, repo, branch in BRANCH_TARGETS:
+            parent = next((x for x in rows
+                           if x["org"] == org and x["repo"] == repo), None)
+            print(f"      · {org}/{repo}@{branch} …", end=" ", flush=True)
+            try:
+                bd = branch_detail(org, repo, branch, since)
+            except Exception as e:                    # noqa: BLE001
+                print(f"失败：{_scrub(e)}")
+                continue
+            row = {
+                "org": org, "repo": f"{repo}@{branch}",
+                "key": f"{org}/{repo}@{branch}",
+                "display_name": f"{org}/{repo}@{branch}",
+                "is_branch": True, "parent_repo": repo, "branch": branch,
+                "description": (parent or {}).get("description", ""),
+                "language": (parent or {}).get("language"),
+                "default_branch": branch,
+                # 仓库级指标分支不独有，继承并标注
+                "stars": (parent or {}).get("stars"),
+                "forks": (parent or {}).get("forks"),
+                "watchers": (parent or {}).get("watchers"),
+                "issues_total": (parent or {}).get("issues_total"),
+                "issues_open": (parent or {}).get("issues_open"),
+                "repo_level_inherited": True,
+                "created_at": (parent or {}).get("created_at"),
+                "updated_at": (parent or {}).get("updated_at"),
+                "pushed_at": (parent or {}).get("pushed_at"),
+            }
+            row.update({k: v for k, v in bd.items() if k != "errors"})
+            row["errors"] = bd.get("errors", [])
+            rows.append(row)
+            print(f"提交 {bd.get('commits_total')}｜PR {bd.get('pr_all')}"
+                  f"（分支参数 {bd.get('branch_param') or '未生效'}）")
+
     # 合并人工指标
     for x in rows:
         m = manual.get(x["key"]) or manual.get(x["repo"]) or {}
@@ -467,6 +554,9 @@ def main() -> int:
         "window_days": args.window,
         "window_since_utc": since,
         "orgs": args.orgs,
+        "branch_targets": [f"{o}/{r}@{b}" for o, r, b in BRANCH_TARGETS],
+        "branch_note": ("分支行的 Star/Fork/Issue 继承自所属仓库（分支无独立计数），"
+                        "仅提交数与 PR 数为该分支实测"),
         "repo_filter": args.filter,
         "quick_mode": args.quick,
         "manual_metrics_measured_at": manual_date,
